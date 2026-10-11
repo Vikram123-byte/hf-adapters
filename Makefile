@@ -148,7 +148,9 @@ perf-tests: ## Run spyre-perf-suite once per MODEL_PATH model into RESULTS_DIR (
 	@if [[ -z "$(strip $(MODEL_PATH))" ]]; then echo "ERROR: perf-tests needs MODEL_PATH (see tests/model_lists/perf.yaml)" >&2; exit 1; fi
 	@if [[ "$(PERF_REPORT)" != split && "$(PERF_REPORT)" != combined ]]; then echo "ERROR: PERF_REPORT must be split or combined" >&2; exit 1; fi
 	@$(PERF_SUITE) --help >/dev/null 2>&1 || { echo "ERROR: spyre-perf-suite is not installed in this image. The perf suite ships as a wheel into hf-adapters-dev; a -minimal image has no perf harness." >&2; exit 1; }
+	@# Expose only this checkout's hf_adapters: the repo root's top-level utils/ would shadow spyre-perf-suite's utils package.
 	@results="$$(mkdir -p "$(RESULTS_DIR)" && cd "$(RESULTS_DIR)" && pwd)"; \
+	shim="$$results/.hf-adapters-path"; mkdir -p "$$shim" && ln -sfn "$$PWD/hf_adapters" "$$shim/hf_adapters"; \
 	rc=0; \
 	for model in $(MODEL_PATH); do \
 	  slug="$${model//\//_}"; \
@@ -156,7 +158,7 @@ perf-tests: ## Run spyre-perf-suite once per MODEL_PATH model into RESULTS_DIR (
 	  echo "=== perf: $$model ==="; \
 	  SENPERFORMANCE="$${SENPERFORMANCE:-2}" \
 	  TORCHINDUCTOR_CACHE_DIR="$$results/inductor-logs-$$slug" \
-	  PYTHONPATH="$$PWD$${PYTHONPATH:+:$$PYTHONPATH}" \
+	  PYTHONPATH="$$shim$${PYTHONPATH:+:$$PYTHONPATH}" \
 	  $(PERF_SUITE) --hf-only --hf-model "$$model" --no-experimental --stacks torch-spyre \
 	    --perf-dir "$$results/perf$$tag" \
 	    --report "$$results/report$$tag.txt" \
