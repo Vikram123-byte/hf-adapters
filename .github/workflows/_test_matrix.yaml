@@ -326,6 +326,12 @@ jobs:
       - linux
       - ${{ inputs.image_label }}
     timeout-minutes: 10
+    # Same artifact-id record the uploaded artifact carries, for spyre-perf-tests' inline ingest (it never uploads artifacts).
+    outputs:
+      record: >-
+        ${{ steps.derive.outputs.artifact_id != '' && format('{0}|{1}|{2}',
+        steps.derive.outputs.artifact_id, steps.derive.outputs.base_artifact_id,
+        steps.delta.outputs.installed) || '' }}
     steps:
       # At torch-spyre main, the same ref the v2 ingest action runs, so both use one id formula.
       - name: Checkout the identity library
@@ -354,6 +360,7 @@ jobs:
           echo "installed=${TOKENS}" >> "$GITHUB_OUTPUT"
 
       - name: Derive and upload the artifact identity
+        id: derive
         uses: torch-spyre/torch-spyre/.github/actions/derive-gha-artifact-id@main
         with:
           component: hf-adapters
@@ -1884,7 +1891,7 @@ jobs:
   # test_type=perf only: one spyre-perf-suite leg per tests/model_lists/perf.yaml model, ingested inline (never uploaded).
   spyre-perf-tests:
     name: Spyre perf (${{ matrix.model_key }})
-    needs: [generate-matrix, resolve-test-type, resolve-torch-spyre]
+    needs: [generate-matrix, resolve-test-type, resolve-torch-spyre, artifact-identity]
     # Plain equality, not the contains(' <key> ') suite-key form: tests/test_tier_tags.py requires that form to name a tier.
     if: ${{ always() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && needs.resolve-test-type.outputs.test_type == 'perf' && needs.generate-matrix.outputs.perf_matrix != '[]' }}
     runs-on:
@@ -1954,6 +1961,8 @@ jobs:
           sha: ${{ steps.build.outputs.target_sha }}
           run-id: ${{ inputs.run_id }}
           gha-run-id: ${{ github.run_id }}
+          # v2 artifacts/artifact_results rows, as the other modes get via push-test-results-to-clickhouse; empty writes benchmarks only.
+          artifact-id: ${{ needs.artifact-identity.outputs.record }}
           repository: ${{ github.repository }}
           trigger-type: perf
           component: hf-adapters
