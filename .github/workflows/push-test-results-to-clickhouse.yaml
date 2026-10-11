@@ -85,11 +85,12 @@ jobs:
     steps:
       # workflow_run always executes this file as it exists on the default
       # branch, so a plain checkout (no ref:) here pulls the canonical copy
-      # of the ingest script regardless of which ref triggered the run.
-      - name: Checkout ingest script
+      # of the ingest scripts regardless of which ref triggered the run.
+      - name: Checkout ingest scripts
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           sparse-checkout: |
+            .github/scripts/download_xml_artifacts.py
             .github/scripts/ingest_xml_hf_adapters.py
           sparse-checkout-cone-mode: false
 
@@ -178,55 +179,9 @@ jobs:
       - name: Download XML artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARTIFACTS: ${{ steps.list-artifacts.outputs.artifacts }}
         run: |
-          mkdir -p xml_artifacts
-          export ARTIFACTS='${{ steps.list-artifacts.outputs.artifacts }}'
-          python3 <<'PYEOF'
-          import json, os, shutil, subprocess, sys, time
-          from pathlib import Path
-
-          ATTEMPTS = 4
-          artifacts = json.loads(os.environ['ARTIFACTS'])
-          repo  = os.environ['GITHUB_REPOSITORY']
-
-          def fetch(a, zip_path, dest):
-              """Download and unzip one artifact; retried whole, since a truncated zip only fails at unzip."""
-              for attempt in range(1, ATTEMPTS + 1):
-                  shutil.rmtree(dest, ignore_errors=True)
-                  for cmd in (
-                      ["gh", "api", f"/repos/{repo}/actions/artifacts/{a['id']}/zip"],
-                      ["unzip", "-q", "-o", str(zip_path), "-d", str(dest)],
-                  ):
-                      result = subprocess.run(cmd, capture_output=True)
-                      if result.returncode != 0:
-                          err = (result.stderr or result.stdout[-500:]).decode(errors="replace").strip()
-                          print(f"[retry] {a['name']}: {cmd[0]} attempt {attempt}/{ATTEMPTS} "
-                                f"exited {result.returncode}: {err}")
-                          break
-                      if cmd[0] == "gh":
-                          zip_path.write_bytes(result.stdout)
-                  else:
-                      return True
-                  if attempt < ATTEMPTS:
-                      time.sleep(2 ** attempt)
-              shutil.rmtree(dest, ignore_errors=True)
-              return False
-
-          failed = []
-          for a in artifacts:
-              print(f"Downloading: {a['name']} (id={a['id']})")
-              # Per-artifact subdirectory: two suites can both produce e.g. "Qwen3-0.6B.xml", and
-              # ingest_xml_hf_adapters.py globs --xml-dir recursively, keyed on the relative path.
-              dest = Path("xml_artifacts") / a["name"]
-              if not fetch(a, Path("xml_artifacts") / f"{a['name']}.zip", dest):
-                  print(f"::warning::Skipping artifact {a['name']} (id={a['id']}): "
-                        f"download/unzip failed {ATTEMPTS} times; its results are not ingested.")
-                  failed.append(a["name"])
-          print(f"Fetched {len(artifacts) - len(failed)}/{len(artifacts)} artifact(s).")
-          if artifacts and len(failed) == len(artifacts):
-              print("::error::No artifact could be downloaded.")
-              sys.exit(1)
-          PYEOF
+          python3 .github/scripts/download_xml_artifacts.py --out-dir xml_artifacts
           echo "Downloaded XML files:"
           find xml_artifacts -name "*.xml" 2>/dev/null || echo "(none)"
 
