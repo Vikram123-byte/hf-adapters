@@ -123,6 +123,20 @@ def moe_topk(probabilities, top_k):
     return weights[:tokens], expert_indices[:tokens]
 
 
+def _moe_flat_row_scale(scale, rows, stick_size):
+    """Broadcast ``[T, K]`` or ``[T, K, stick]`` scales onto ``[T*K, 1, 1]``.
+
+    A direct ``[T, K] -> [T*K, 1, 1]`` reshape makes the within-stick
+    coordinate ``floor(d0/K)``. Gemma-4 decode hits this with K=8, and Spyre
+    only accepts ``Mod(var, stick)``, a bare variable, or 0. Widen onto a full
+    stick first, matching the gather-index expansion below, so the flatten only
+    merges the leading axes and the slice keeps stick coordinate 0.
+    """
+    if scale.ndim == 2:
+        scale = scale.unsqueeze(-1).expand(-1, -1, stick_size).contiguous()
+    return scale.reshape(rows, 1, stick_size)[..., :1]
+
+
 def moe_decode_selected_experts(
     x,
     weights,
@@ -170,17 +184,17 @@ def moe_decode_selected_experts(
             activated = F.silu(gate_out) * up_out
         else:
             activated = F.gelu(gate_out, approximate="tanh") * up_out
-        # Multiply on the flattened (T*top_k) axis before reshaping back to
-        # [T, top_k, H]. Reshape-then-broadcast (weights[..., None] against a
-        # view of [T*top_k, 1, H]) leaves restickify with disagreeing batch×expert
-        # axes and fails for batch>1 (gemma-4-26B decode).
+        # Multiply on the flattened (T*top_k) rows. Reshape-then-broadcast
+        # against [T, K] cannot reconcile the batch×expert axes (gemma-4-26B
+        # decode, batch>1), and reshaping [T, K] itself is an illegal stick
+        # coordinate. _moe_flat_row_scale widens onto a stick before the flatten.
         expert_out = torch.bmm(activated, selected_down)
-        expert_out = expert_out * weights.reshape(rows, 1, 1)
+        expert_out = expert_out * _moe_flat_row_scale(weights, rows, stick_size)
         if per_expert_scale_stick is not None:
-            expert_scale = per_expert_scale_stick[expert_indices][..., :1].reshape(
-                rows, 1, 1
+            expert_scale = per_expert_scale_stick[expert_indices]
+            expert_out = expert_out * _moe_flat_row_scale(
+                expert_scale, rows, stick_size
             )
-            expert_out = expert_out * expert_scale
         return expert_out.reshape(T, top_k, H).sum(dim=1)
 
 
