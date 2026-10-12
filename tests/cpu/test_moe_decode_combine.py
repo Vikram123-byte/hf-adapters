@@ -14,10 +14,10 @@
 
 """CPU numerics for the decode expert combine.
 
-Spyre rejects a direct ``[T, K] -> [T*K, 1, 1]`` view (stick coordinate
-``floor(d0/K)``). The combine widens scales onto a stick first; these checks
-lock that this stays equal to the per-expert multiply, including Gemma-4's
-batch=4, K=8 shape and a per-expert scale that lives in stick lane 0.
+Spyre cannot view ``[T, K]`` as ``[T*K, 1, 1]`` or broadcast a one-lane
+slice of a stick. The combine repeats each scale across a full stick and
+multiplies stick-by-stick. These checks lock that this matches the
+per-expert scalar multiply at Gemma-4's batch=4, K=8 shape.
 """
 
 import torch
@@ -50,7 +50,9 @@ def _reference(x, weights, expert_indices, gate, up, down, activation, scale_sti
 def test_decode_combine_matches_per_expert_multiply():
     torch.manual_seed(0)
     experts, tokens, top_k = 16, 4, 8
-    hidden, intermediate, stick = 64, 64, 64
+    # Hidden spans two sticks so the scale is broadcast across sticks, not
+    # only the single-stick case.
+    hidden, intermediate, stick = 128, 64, 64
     x = torch.randn(tokens, hidden)
     gate = torch.randn(experts, hidden, intermediate)
     up = torch.randn(experts, hidden, intermediate)
@@ -59,8 +61,8 @@ def test_decode_combine_matches_per_expert_multiply():
     weights = weights / weights.sum(-1, keepdim=True)
     expert_indices = torch.randint(0, experts, (tokens, top_k))
     scale = torch.randn(experts)
-    scale_stick = torch.zeros(experts, stick)
-    scale_stick[:, 0] = scale
+    # Device DMA stores the same scale on every lane of the expert stick.
+    scale_stick = scale[:, None].expand(-1, stick).contiguous()
 
     for activation, scale_arg in (
         ("gelu_tanh", scale_stick),
@@ -90,3 +92,20 @@ def test_decode_combine_matches_per_expert_multiply():
             scale_arg,
         )
         torch.testing.assert_close(got, expected, atol=1e-5, rtol=1e-5)
+
+    # Qwen decode already carries the routing weight on every stick lane.
+    widened = weights.unsqueeze(-1).expand(-1, -1, stick).contiguous()
+    got = moe_decode_selected_experts(
+        x,
+        widened,
+        expert_indices,
+        gate,
+        up,
+        down,
+        top_k,
+        32,
+        stick,
+        "silu",
+    )
+    expected = _reference(x, weights, expert_indices, gate, up, down, "silu", None)
+    torch.testing.assert_close(got, expected, atol=1e-5, rtol=1e-5)
