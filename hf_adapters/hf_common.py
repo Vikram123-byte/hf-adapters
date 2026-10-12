@@ -170,12 +170,18 @@ def moe_decode_selected_experts(
             activated = F.silu(gate_out) * up_out
         else:
             activated = F.gelu(gate_out, approximate="tanh") * up_out
-        expert_out = torch.bmm(activated, selected_down).reshape(T, top_k, H)
-        expert_out = expert_out * weights[..., None]
+        # Multiply on the flattened (T*top_k) axis before reshaping back to
+        # [T, top_k, H]. Reshape-then-broadcast (weights[..., None] against a
+        # view of [T*top_k, 1, H]) leaves restickify with disagreeing batch×expert
+        # axes and fails for batch>1 (gemma-4-26B decode).
+        expert_out = torch.bmm(activated, selected_down)
+        expert_out = expert_out * weights.reshape(rows, 1, 1)
         if per_expert_scale_stick is not None:
-            expert_scale = per_expert_scale_stick[expert_indices][..., :1]
+            expert_scale = per_expert_scale_stick[expert_indices][..., :1].reshape(
+                rows, 1, 1
+            )
             expert_out = expert_out * expert_scale
-        return expert_out.sum(dim=1)
+        return expert_out.reshape(T, top_k, H).sum(dim=1)
 
 
 @contextmanager
